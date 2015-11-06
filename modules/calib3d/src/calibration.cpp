@@ -1232,7 +1232,6 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
                     CvMat* rvecs, CvMat* tvecs, int flags, CvTermCriteria termCrit )
 {
     const int NINTRINSIC = 16;
-    CvLevMarq solver;
     double reprojErr = 0;
 
     Matx33d A;
@@ -1388,11 +1387,11 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
         cvInitIntrinsicParams2D( &_matM, &m, npoints, imageSize, &matA, aspectRatio );
     }
 
-    solver.init( nparams, 0, termCrit );
+    LevMarq solver( nparams, 0, termCrit );
 
     {
-    double* param = solver.param->data.db;
-    uchar* mask = solver.mask->data.ptr;
+    double* param = solver.param.ptr<double>();
+    uchar* mask = solver.mask.ptr();
 
     param[0] = A(0, 0); param[1] = A(1, 1); param[2] = A(0, 2); param[3] = A(1, 2);
     std::copy(k, k + 12, param + 4);
@@ -1430,12 +1429,10 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
     // 2. initialize extrinsic parameters
     for( i = 0, pos = 0; i < nimages; i++, pos += ni )
     {
-        CvMat _ri, _ti;
         ni = npoints->data.i[i*npstep];
 
-        cvGetRows( solver.param, &_ri, NINTRINSIC + i*6, NINTRINSIC + i*6 + 3 );
-        cvGetRows( solver.param, &_ti, NINTRINSIC + i*6 + 3, NINTRINSIC + i*6 + 6 );
-
+        CvMat _ri(solver.param.rowRange(NINTRINSIC + i*6, NINTRINSIC + i*6 + 3));
+        CvMat _ti(solver.param.rowRange(NINTRINSIC + i*6 + 3, NINTRINSIC + i*6 + 6));
         CvMat _Mi(matM.colRange(pos, pos + ni));
         CvMat _mi(_m.colRange(pos, pos + ni));
 
@@ -1445,11 +1442,10 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
     // 3. run the optimization
     for(;;)
     {
-        const CvMat* _param = 0;
-        CvMat *_JtJ = 0, *_JtErr = 0;
+        Mat _param, _JtJ, _JtErr;
         double* _errNorm = 0;
         bool proceed = solver.updateAlt( _param, _JtJ, _JtErr, _errNorm );
-        double *param = solver.param->data.db, *pparam = solver.prevParam->data.db;
+        double *param = solver.param.ptr<double>(), *pparam = solver.prevParam.ptr<double>();
 
         if( flags & CV_CALIB_FIX_ASPECT_RATIO )
         {
@@ -1467,12 +1463,10 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
 
         for( i = 0, pos = 0; i < nimages; i++, pos += ni )
         {
-            CvMat _ri, _ti;
             ni = npoints->data.i[i*npstep];
 
-            cvGetRows( solver.param, &_ri, NINTRINSIC + i*6, NINTRINSIC + i*6 + 3 );
-            cvGetRows( solver.param, &_ti, NINTRINSIC + i*6 + 3, NINTRINSIC + i*6 + 6 );
-
+            CvMat _ri(solver.param.rowRange(NINTRINSIC + i*6, NINTRINSIC + i*6 + 3));
+            CvMat _ti(solver.param.rowRange(NINTRINSIC + i*6 + 3, NINTRINSIC + i*6 + 6));
             CvMat _Mi(matM.colRange(pos, pos + ni));
             CvMat _mi(_m.colRange(pos, pos + ni));
 
@@ -1484,7 +1478,7 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
             CvMat _dpdk(_Ji.colRange(4, NINTRINSIC));
             CvMat _mp(_err.reshape(2, 1));
 
-            if( solver.state == CvLevMarq::CALC_J )
+            if( solver.state == LevMarq::CALC_J )
             {
                  cvProjectPoints2( &_Mi, &_ri, &_ti, &matA, &_k, &_mp, &_dpdr, &_dpdt,
                                   (flags & CV_CALIB_FIX_FOCAL_LENGTH) ? 0 : &_dpdf,
@@ -1496,17 +1490,15 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
 
             cvSub( &_mp, &_mi, &_mp );
 
-            if( solver.state == CvLevMarq::CALC_J )
+            if( solver.state == LevMarq::CALC_J )
             {
-                Mat JtJ(cvarrToMat(_JtJ)), JtErr(cvarrToMat(_JtErr));
-
                 // see HZ: (A6.14) for details on the structure of the Jacobian
-                JtJ(Rect(0, 0, NINTRINSIC, NINTRINSIC)) += _Ji.t() * _Ji;
-                JtJ(Rect(NINTRINSIC + i * 6, NINTRINSIC + i * 6, 6, 6)) = _Je.t() * _Je;
-                JtJ(Rect(NINTRINSIC + i * 6, 0, 6, NINTRINSIC)) = _Ji.t() * _Je;
+                _JtJ(Rect(0, 0, NINTRINSIC, NINTRINSIC)) += _Ji.t() * _Ji;
+                _JtJ(Rect(NINTRINSIC + i * 6, NINTRINSIC + i * 6, 6, 6)) = _Je.t() * _Je;
+                _JtJ(Rect(NINTRINSIC + i * 6, 0, 6, NINTRINSIC)) = _Ji.t() * _Je;
 
-                JtErr.rowRange(0, NINTRINSIC) += _Ji.t() * _err;
-                JtErr.rowRange(NINTRINSIC + i * 6, NINTRINSIC + (i + 1) * 6) = _Je.t() * _err;
+                _JtErr.rowRange(0, NINTRINSIC) += _Ji.t() * _err;
+                _JtErr.rowRange(NINTRINSIC + i * 6, NINTRINSIC + (i + 1) * 6) = _Je.t() * _err;
             }
 
             reprojErr += norm(_err, NORM_L2SQR);
@@ -1524,7 +1516,7 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
         CvMat src, dst;
         if( rvecs )
         {
-            src = cvMat( 3, 1, CV_64F, solver.param->data.db + NINTRINSIC + i*6 );
+            src = cvMat( 3, 1, CV_64F, solver.param.ptr<double>() + NINTRINSIC + i*6 );
             if( rvecs->rows == nimages && rvecs->cols*CV_MAT_CN(rvecs->type) == 9 )
             {
                 dst = cvMat( 3, 3, CV_MAT_DEPTH(rvecs->type),
@@ -1542,7 +1534,7 @@ CV_IMPL double cvCalibrateCamera2( const CvMat* objectPoints,
         }
         if( tvecs )
         {
-            src = cvMat( 3, 1, CV_64F, solver.param->data.db + NINTRINSIC + i*6 + 3 );
+            src = cvMat( 3, 1, CV_64F, solver.param.ptr<double>() + NINTRINSIC + i*6 + 3 );
             dst = cvMat( 3, 1, CV_MAT_DEPTH(tvecs->type), tvecs->rows == 1 ?
                     tvecs->data.ptr + i*CV_ELEM_SIZE(tvecs->type) :
                     tvecs->data.ptr + tvecs->step*i );

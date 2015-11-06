@@ -57,7 +57,6 @@
 #define GET_OPTIMIZED(func) (func)
 #endif
 
-
 namespace cv
 {
 
@@ -114,6 +113,37 @@ template<typename T> inline int compressElems( T* ptr, const uchar* mask, int ms
         }
     return j;
 }
+
+class CV_EXPORTS LevMarq
+{
+public:
+    LevMarq( int nparams, int nerrs, TermCriteria criteria=
+              TermCriteria(TermCriteria::EPS+TermCriteria::MAX_ITER,30,DBL_EPSILON),
+              bool completeSymmFlag=false );
+
+    bool update( Mat& param, Mat& J, Mat& err );
+    bool updateAlt( Mat& param, Mat& JtJ, Mat& JtErr, double*& errNorm );
+
+    void step();
+    enum { DONE=0, STARTED=1, CALC_J=2, CHECK_ERR=3 };
+
+    Mat mask;
+    Mat prevParam;
+    Mat param;
+    Mat J;
+    Mat err;
+    Mat JtJ;
+    Mat JtJN;
+    Mat JtErr;
+    Mat JtJV;
+    Mat JtJW;
+    double prevErrNorm, errNorm;
+    int lambdaLg10;
+    TermCriteria criteria;
+    int state;
+    int iters;
+    bool completeSymmFlag;
+};
 
 }
 

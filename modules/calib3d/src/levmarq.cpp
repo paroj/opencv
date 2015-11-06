@@ -219,4 +219,209 @@ Ptr<LMSolver> createLMSolver(const Ptr<LMSolver::Callback>& cb, int maxIters)
     return makePtr<LMSolverImpl>(cb, maxIters);
 }
 
+LevMarq::LevMarq( int nparams, int nerrs, TermCriteria criteria0, bool _completeSymmFlag )
+{
+    mask.create( nparams, 1, CV_8U);
+    mask.setTo(1);
+    prevParam.create( nparams, 1, CV_64F );
+    param.create( nparams, 1, CV_64F );
+    JtJ.create( nparams, nparams, CV_64F );
+    JtJN.create( nparams, nparams, CV_64F );
+    JtJV.create( nparams, nparams, CV_64F );
+    JtJW.create( nparams, 1, CV_64F );
+    JtErr.create( nparams, 1, CV_64F );
+    if( nerrs > 0 )
+    {
+        J.create( nerrs, nparams, CV_64F );
+        err.create( nerrs, 1, CV_64F );
+    }
+    errNorm = prevErrNorm = DBL_MAX;
+    lambdaLg10 = -3;
+    criteria = criteria0;
+    if( criteria.type & TermCriteria::COUNT )
+        criteria.maxCount = MIN(MAX(criteria.maxCount,1),1000);
+    else
+        criteria.maxCount = 30;
+    if( criteria.type & TermCriteria::EPS )
+        criteria.epsilon = MAX(criteria.epsilon, 0);
+    else
+        criteria.epsilon = DBL_EPSILON;
+    state = STARTED;
+    iters = 0;
+    completeSymmFlag = _completeSymmFlag;
+}
+
+bool LevMarq::update( Mat& _param, Mat& matJ, Mat& _err )
+{
+    double change;
+
+    matJ = _err = 0;
+
+    assert( !err.empty() );
+    if( state == DONE )
+    {
+        _param = param;
+        return false;
+    }
+
+    if( state == STARTED )
+    {
+        _param = param;
+        J = 0;
+        err = 0;
+        matJ = J;
+        _err = err;
+        state = CALC_J;
+        return true;
+    }
+
+    if( state == CALC_J )
+    {
+        mulTransposed( J, JtJ, 1 );
+        gemm( J, err, 1, 0, 0, JtErr, GEMM_1_T );
+        param.copyTo( prevParam );
+        step();
+        if( iters == 0 )
+            prevErrNorm = norm(err, NORM_L2);
+        _param = param;
+        err = 0;
+        _err = err;
+        state = CHECK_ERR;
+        return true;
+    }
+
+    assert( state == CHECK_ERR );
+    errNorm = norm( err, NORM_L2 );
+    if( errNorm > prevErrNorm )
+    {
+        if( ++lambdaLg10 <= 16 )
+        {
+            step();
+            _param = param;
+            err = 0;
+            _err = err;
+            state = CHECK_ERR;
+            return true;
+        }
+    }
+
+    lambdaLg10 = MAX(lambdaLg10-1, -16);
+    if( ++iters >= criteria.maxCount ||
+        (change = norm(param, prevParam, NORM_L2 | NORM_RELATIVE)) < criteria.epsilon )
+    {
+        _param = param;
+        state = DONE;
+        return true;
+    }
+
+    prevErrNorm = errNorm;
+    _param = param;
+    J = 0;
+    matJ = J;
+    _err = err;
+    state = CALC_J;
+    return true;
+}
+
+
+bool LevMarq::updateAlt( Mat& _param, Mat& _JtJ, Mat& _JtErr, double*& _errNorm )
+{
+    double change;
+
+    CV_Assert( err.empty() );
+    if( state == DONE )
+    {
+        _param = param;
+        return false;
+    }
+
+    if( state == STARTED )
+    {
+        _param = param;
+        JtJ = 0;
+        JtErr = 0;
+        errNorm = 0;
+        _JtJ = JtJ;
+        _JtErr = JtErr;
+        _errNorm = &errNorm;
+        state = CALC_J;
+        return true;
+    }
+
+    if( state == CALC_J )
+    {
+        param.copyTo( prevParam );
+        step();
+        _param = param;
+        prevErrNorm = errNorm;
+        errNorm = 0;
+        _errNorm = &errNorm;
+        state = CHECK_ERR;
+        return true;
+    }
+
+    assert( state == CHECK_ERR );
+    if( errNorm > prevErrNorm )
+    {
+        if( ++lambdaLg10 <= 16 )
+        {
+            step();
+            _param = param;
+            errNorm = 0;
+            _errNorm = &errNorm;
+            state = CHECK_ERR;
+            return true;
+        }
+    }
+
+    lambdaLg10 = MAX(lambdaLg10-1, -16);
+    if( ++iters >= criteria.maxCount ||
+        (change = norm(param, prevParam, NORM_L2 | NORM_RELATIVE)) < criteria.epsilon )
+    {
+        _param = param;
+        state = DONE;
+        return false;
+    }
+
+    prevErrNorm = errNorm;
+    JtJ = 0;
+    JtErr = 0;
+    _param = param;
+    _JtJ = JtJ;
+    _JtErr = JtErr;
+    state = CALC_J;
+    return true;
+}
+
+void LevMarq::step()
+{
+    const double LOG10 = log(10.);
+    double lambda = exp(lambdaLg10*LOG10);
+    int nparams = param.rows;
+
+    for( int i = 0; i < nparams; i++ )
+        if( mask.ptr()[i] == 0 )
+        {
+            JtJ.row(i) = 0;
+            JtJ.col(i) = 0;
+            JtErr.ptr<double>()[i] = 0;
+        }
+
+    if( err.empty() )
+        completeSymm( JtJ, completeSymmFlag );
+
+    JtJ.copyTo(JtJN);
+#if 1
+    JtJN.diag() *= 1. + lambda;
+#else
+    JtJN.diag() += lambda;
+#endif
+    // solve(JtJN, JtErr, param, DECOMP_SVD);
+    SVD::compute(JtJN, JtJW, noArray(), JtJV, SVD::MODIFY_A);
+    SVD::backSubst(JtJW, JtJV.t(), JtJV, JtErr, param);
+
+    for( int i = 0; i < nparams; i++ )
+        param.at<double>(i) = prevParam.at<double>(i) - (mask.ptr()[i] ? param.at<double>(i) : 0);
+}
+
 }
