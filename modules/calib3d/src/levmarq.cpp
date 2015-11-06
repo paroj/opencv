@@ -219,4 +219,145 @@ Ptr<LMSolver> createLMSolver(const Ptr<LMSolver::Callback>& cb, int maxIters)
     return makePtr<LMSolverImpl>(cb, maxIters);
 }
 
+SparseLevMarq::SparseLevMarq(const TermCriteria& criteria0 )
+{
+    errNorm = prevErrNorm = DBL_MAX;
+    lambdaLg10 = -3;
+    criteria = criteria0;
+    state = STARTED;
+    iters = 0;
+}
+
+bool SparseLevMarq::updateAlt( Mat& _U, Mat& _V, Mat& _W, Mat& _JtErr, double*& _errNorm )
+{
+    if( state == DONE )
+    {
+        return false;
+    }
+
+    if( state == STARTED )
+    {
+        param.copyTo( prevParam );
+        errNorm = 0;
+        _errNorm = &errNorm;
+        state = CALC_J;
+        return true;
+    }
+
+    if( state == CALC_J )
+    {
+        W = _W;
+        JtErr = _JtErr;
+        U = _U;
+        V = _V;
+        param.copyTo( prevParam );
+        step();
+        prevErrNorm = errNorm;
+        errNorm = 0;
+        _errNorm = &errNorm;
+        state = CHECK_ERR;
+        return true;
+    }
+
+    assert( state == CHECK_ERR );
+    if( errNorm > prevErrNorm )
+    {
+        if( ++lambdaLg10 <= 16 )
+        {
+            step();
+            errNorm = 0;
+            _errNorm = &errNorm;
+            state = CHECK_ERR;
+            return true;
+        }
+    }
+
+    lambdaLg10 = MAX(lambdaLg10-1, -16);
+    if( ++iters >= criteria.maxCount ||
+        (norm(param, prevParam, NORM_L2 | NORM_RELATIVE)) < criteria.epsilon )
+    {
+        state = DONE;
+        return false;
+    }
+
+    prevErrNorm = errNorm;
+    state = CALC_J;
+    return true;
+}
+
+/**
+ * implements HZ: A6.3
+ */
+void SparseLevMarq::step()
+{
+    const double LOG10 = log(10.);
+    double lambda = exp(lambdaLg10*LOG10);
+    int nparams = param.rows;
+
+    for( int i = 0; i < nparams; i++ )
+        if( !mask.ptr()[i] )
+        {
+            U.row(i) = 0;
+            U.col(i) = 0;
+            W.row(i) = 0;
+            JtErr.at<double>(i) = 0;
+        }
+
+    const int nparamsA = U.cols;
+    const int nparamsB = V.cols;
+    const int nblocksB = (nparams - nparamsA) / nparamsB;
+
+    CV_Assert((nparams - nparamsA) % nparamsB == 0);
+
+    // HZ A6.3 (ii)
+    U.copyTo(Ustar);
+    V.copyTo(Vstar);
+
+#if 1
+    Ustar.diag() *= 1. + lambda;
+    for(int i = 0; i < nblocksB; i++) {
+        Vstar.rowRange(i * nparamsB, (i + 1) * nparamsB).diag() *= 1. + lambda;
+    }
+#else
+    Ustar.diag() += lambda;
+    for(int i = 0; i < nblocksB; i++) {
+        Vstar.colRange(i * nparamsB, (i + 1) * nparamsB).diag() += lambda;
+    }
+#endif
+
+    Y.create(nparamsA*nblocksB, nparamsB, CV_64F);
+
+    for(int i = 0; i < nblocksB; i++) {
+        // Y = W . V*^-1
+        Y.rowRange(i*nparamsA, (i + 1)*nparamsA) =
+                W.colRange(i * nparamsB, (i + 1) * nparamsB)*Vstar.rowRange(i * nparamsB, (i + 1) * nparamsB).inv();
+    }
+
+    // HZ A6.3 (iii)
+    Mat S = Ustar;
+    Mat e = JtErr.rowRange(0, nparamsA).clone();
+
+    const Mat errB = JtErr.rowRange(nparamsA, JtErr.rows);
+
+    for(int i = 0; i < nblocksB; i++) {
+        S -= Y.rowRange(i * nparamsA, (i + 1) * nparamsA) * W.colRange(i * nparamsB, (i + 1) * nparamsB).t();
+        e -= Y.rowRange(i * nparamsA, (i + 1) * nparamsA) * errB.rowRange(i * nparamsB, (i + 1) * nparamsB);
+    }
+
+    const Mat paramA = param.rowRange(0, nparamsA);
+
+    solve(S, e, paramA, DECOMP_SVD);
+
+    // HZ A6.3 (iv)
+    for(int i = 0; i < nblocksB; i++) {
+        param.rowRange(nparamsA + i*nparamsB, nparamsA + (i + 1)*nparamsB) =
+                Vstar.rowRange(i * nparamsB, (i + 1) * nparamsB).inv()
+                *(errB.rowRange(i * nparamsB, (i + 1) * nparamsB) -
+                        W.colRange(i * nparamsB, (i + 1) * nparamsB).t()*paramA);
+    }
+
+    for( int i = 0; i < nparams; i++ )
+        param.at<double>(i) = prevParam.at<double>(i) - (mask.ptr()[i] ? param.at<double>(i) : 0);
+}
+
 }

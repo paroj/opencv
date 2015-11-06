@@ -115,6 +115,36 @@ template<typename T> inline int compressElems( T* ptr, const uchar* mask, int ms
     return j;
 }
 
+class SparseLevMarq
+{
+private:
+    // cache to avoid re-allocation
+    Mat Ustar;
+    Mat Vstar;
+    Mat Y;
+public:
+    SparseLevMarq( const TermCriteria& criteria=
+              TermCriteria(TermCriteria::EPS+TermCriteria::MAX_ITER,30,DBL_EPSILON));
+
+    bool updateAlt( Mat& U, Mat& V, Mat& W, Mat& JtErr, double*& errNorm );
+
+    void step();
+    enum { DONE=0, STARTED=1, CALC_J=2, CHECK_ERR=3 };
+
+    Mat mask;
+    Mat prevParam;
+    Mat param;
+    Mat U;
+    Mat V;
+    Mat W;
+    Mat JtErr;
+    double prevErrNorm, errNorm;
+    int lambdaLg10;
+    TermCriteria criteria;
+    int state;
+    int iters;
+};
+
 }
 
 #endif
