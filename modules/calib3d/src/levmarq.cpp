@@ -89,6 +89,11 @@ public:
         printInterval = 0;
     }
 
+    /*
+     * implementation of
+     * Fletcher, Roger. MODIFIED MARQUARDT SUBROUTINE FOR NON-LINEAR LEAST SQUARES.
+     * No. AERE-R--6799. Atomic Energy Research Establishment, Harwell (England), 1971.
+     */
     int run(InputOutputArray _param0) const
     {
         Mat param0 = _param0.getMat(), x, xd, r, rd, J, A, Ap, v, temp_d, d;
