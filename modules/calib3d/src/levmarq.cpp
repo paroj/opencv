@@ -219,6 +219,33 @@ Ptr<LMSolver> createLMSolver(const Ptr<LMSolver::Callback>& cb, int maxIters)
     return makePtr<LMSolverImpl>(cb, maxIters);
 }
 
+namespace {
+void subMatrix(const Mat& src, Mat& dst, const std::vector<uchar>& cols, const std::vector<uchar>& rows)
+{
+    int nonzeros_cols = cv::countNonZero(cols);
+    Mat tmp(src.rows, nonzeros_cols, CV_64FC1);
+
+    for (int i = 0, j = 0; i < (int)cols.size(); i++)
+    {
+        if (cols[i])
+        {
+            src.col(i).copyTo(tmp.col(j++));
+        }
+    }
+
+    int nonzeros_rows  = cv::countNonZero(rows);
+    dst.create(nonzeros_rows, nonzeros_cols, CV_64FC1);
+    for (int i = 0, j = 0; i < (int)rows.size(); i++)
+    {
+        if (rows[i])
+        {
+            tmp.row(i).copyTo(dst.row(j++));
+        }
+    }
+}
+
+}
+
 LevMarq::LevMarq( int nparams, int nerrs, TermCriteria criteria0, bool _completeSymmFlag )
 {
     mask.create( nparams, 1, CV_8U);
@@ -227,8 +254,6 @@ LevMarq::LevMarq( int nparams, int nerrs, TermCriteria criteria0, bool _complete
     param.create( nparams, 1, CV_64F );
     JtJ.create( nparams, nparams, CV_64F );
     JtJN.create( nparams, nparams, CV_64F );
-    JtJV.create( nparams, nparams, CV_64F );
-    JtJW.create( nparams, 1, CV_64F );
     JtErr.create( nparams, 1, CV_64F );
     if( nerrs > 0 )
     {
@@ -399,29 +424,24 @@ void LevMarq::step()
     double lambda = exp(lambdaLg10*LOG10);
     int nparams = param.rows;
 
-    for( int i = 0; i < nparams; i++ )
-        if( mask.ptr()[i] == 0 )
-        {
-            JtJ.row(i) = 0;
-            JtJ.col(i) = 0;
-            JtErr.ptr<double>()[i] = 0;
-        }
+    Mat _JtErr;
+    subMatrix(JtErr, _JtErr, Mat(std::vector<uchar>(1, 1)), Mat(mask));
+    subMatrix(JtJ, JtJN, Mat(mask), Mat(mask));
 
     if( err.empty() )
-        completeSymm( JtJ, completeSymmFlag );
+        completeSymm( JtJN, completeSymmFlag );
 
-    JtJ.copyTo(JtJN);
 #if 1
     JtJN.diag() *= 1. + lambda;
 #else
     JtJN.diag() += lambda;
 #endif
-    // solve(JtJN, JtErr, param, DECOMP_SVD);
-    SVD::compute(JtJN, JtJW, noArray(), JtJV, SVD::MODIFY_A);
-    SVD::backSubst(JtJW, JtJV.t(), JtJV, JtErr, param);
+    Mat tmp;
+    solve(JtJN, _JtErr, tmp);
 
+    int j = 0;
     for( int i = 0; i < nparams; i++ )
-        param.at<double>(i) = prevParam.at<double>(i) - (mask.ptr()[i] ? param.at<double>(i) : 0);
+        param.at<double>(i) = prevParam.at<double>(i) - (mask.ptr()[i] ? tmp.at<double>(j++) : 0);
 }
 
 }
