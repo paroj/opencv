@@ -533,14 +533,13 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
 
     int i, j, count;
     int calc_derivatives;
-    const CvPoint3D64f* M;
-    CvPoint2D64f* m;
-    double r[3], R[9], dRdr[27], t[3], a[9], k[14] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0}, fx, fy, cx, cy;
+    double r[3], R[9], t[3], a[9], k[14] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0}, fx, fy;
     Matx33d matTilt = Matx33d::eye();
     Matx33d dMatTiltdTauX(0,0,0,0,0,0,0,-1,0);
     Matx33d dMatTiltdTauY(0,0,0,0,0,0,1,0,0);
     CvMat _r, _t, _a = cvMat( 3, 3, CV_64F, a ), _k;
-    CvMat matR = cvMat( 3, 3, CV_64F, R ), _dRdr = cvMat( 3, 9, CV_64F, dRdr );
+    CvMat matR = cvMat( 3, 3, CV_64F, R );
+    Matx<double, 3, 9> dRdr;
     double *dpdr_p = 0, *dpdt_p = 0, *dpdk_p = 0, *dpdf_p = 0, *dpdc_p = 0;
     int dpdr_step = 0, dpdt_step = 0, dpdk_step = 0, dpdf_step = 0, dpdc_step = 0;
     bool fixedAspectRatio = aspectRatio > FLT_EPSILON;
@@ -589,8 +588,8 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
         CV_Error( CV_StsBadArg, "Homogeneous coordinates are not supported" );
     }
 
-    M = (CvPoint3D64f*)matM->data.db;
-    m = (CvPoint2D64f*)_m->data.db;
+    const Point3d* M = (Point3d*)matM->data.db;
+    Point2d* m = (Point2d*)_m->data.db;
 
     if( (CV_MAT_DEPTH(r_vec->type) != CV_64F && CV_MAT_DEPTH(r_vec->type) != CV_32F) ||
         (((r_vec->rows != 1 && r_vec->cols != 1) ||
@@ -598,6 +597,8 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
         ((r_vec->rows != 3 && r_vec->cols != 3) || CV_MAT_CN(r_vec->type) != 1)))
         CV_Error( CV_StsBadArg, "Rotation must be represented by 1x3 or 3x1 "
                   "floating-point rotation vector, or 3x3 rotation matrix" );
+
+    CvMat _dRdr = Mat(dRdr, false);
 
     if( r_vec->rows == 3 && r_vec->cols == 3 )
     {
@@ -628,7 +629,7 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
 
     cvConvert( A, &_a );
     fx = a[0]; fy = a[4];
-    cx = a[2]; cy = a[5];
+    Point2d c(a[2], a[5]);
 
     if( fixedAspectRatio )
         fx = fy*aspectRatio;
@@ -755,7 +756,6 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
         double y = R[3]*X + R[4]*Y + R[5]*Z + t[1];
         double z = R[6]*X + R[7]*Y + R[8]*Z + t[2];
         double r2, r4, r6, a1, a2, a3, cdist, icdist2;
-        double xd, yd, xd0, yd0, invProj;
         Vec3d vecTilt;
         Vec3d dVecTilt;
         Matx22d dMatTilt;
@@ -763,6 +763,8 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
 
         z = z ? 1./z : 1;
         x *= z; y *= z;
+
+        Vec2d p(x, y);
 
         r2 = x*x + y*y;
         r4 = r2*r2;
@@ -772,17 +774,16 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
         a3 = r2 + 2*y*y;
         cdist = 1 + k[0]*r2 + k[1]*r4 + k[4]*r6;
         icdist2 = 1./(1 + k[5]*r2 + k[6]*r4 + k[7]*r6);
-        xd0 = x*cdist*icdist2 + k[2]*a1 + k[3]*a2 + k[8]*r2+k[9]*r4;
-        yd0 = y*cdist*icdist2 + k[2]*a3 + k[3]*a1 + k[10]*r2+k[11]*r4;
+
+        Vec2d pd0 = p*cdist*icdist2 + Vec2d(k[2]*a1 + k[3]*a2 + k[8]*r2+k[9]*r4,
+                                            k[2]*a3 + k[3]*a1 + k[10]*r2+k[11]*r4);
 
         // additional distortion by projecting onto a tilt plane
-        vecTilt = matTilt*Vec3d(xd0, yd0, 1);
-        invProj = vecTilt(2) ? 1./vecTilt(2) : 1;
-        xd = invProj * vecTilt(0);
-        yd = invProj * vecTilt(1);
+        vecTilt = matTilt*Vec3d(pd0[0], pd0[1], 1);
+        double invProj = vecTilt(2) ? 1./vecTilt(2) : 1;
 
-        m[i].x = xd*fx + cx;
-        m[i].y = yd*fy + cy;
+        Point2d pd = invProj * Point2d(vecTilt[0], vecTilt[1]);
+        m[i] = Point2d(pd.x*fx, pd.y*fy) + c;
 
         if( calc_derivatives )
         {
@@ -798,15 +799,15 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
             {
                 if( fixedAspectRatio )
                 {
-                    dpdf_p[0] = 0; dpdf_p[1] = xd*aspectRatio;
+                    dpdf_p[0] = 0; dpdf_p[1] = pd.x*aspectRatio;
                     dpdf_p[dpdf_step] = 0;
-                    dpdf_p[dpdf_step+1] = yd;
+                    dpdf_p[dpdf_step+1] = pd.y;
                 }
                 else
                 {
-                    dpdf_p[0] = xd; dpdf_p[1] = 0;
+                    dpdf_p[0] = pd.x; dpdf_p[1] = 0;
                     dpdf_p[dpdf_step] = 0;
-                    dpdf_p[dpdf_step+1] = yd;
+                    dpdf_p[dpdf_step+1] = pd.y;
                 }
                 dpdf_p += dpdf_step*2;
             }
@@ -818,10 +819,10 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
             dMatTilt *= invProjSquare;
             if( dpdk_p )
             {
-                dXdYd = dMatTilt*Vec2d(x*icdist2*r2, y*icdist2*r2);
+                dXdYd = dMatTilt*p*icdist2*r2;
                 dpdk_p[0] = fx*dXdYd(0);
                 dpdk_p[dpdk_step] = fy*dXdYd(1);
-                dXdYd = dMatTilt*Vec2d(x*icdist2*r4, y*icdist2*r4);
+                dXdYd = dMatTilt*p*icdist2*r4;
                 dpdk_p[1] = fx*dXdYd(0);
                 dpdk_p[dpdk_step+1] = fy*dXdYd(1);
                 if( _dpdk->cols > 2 )
@@ -834,22 +835,19 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
                     dpdk_p[dpdk_step+3] = fy*dXdYd(1);
                     if( _dpdk->cols > 4 )
                     {
-                        dXdYd = dMatTilt*Vec2d(x*icdist2*r6, y*icdist2*r6);
+                        dXdYd = dMatTilt*p*icdist2*r6;
                         dpdk_p[4] = fx*dXdYd(0);
                         dpdk_p[dpdk_step+4] = fy*dXdYd(1);
 
                         if( _dpdk->cols > 5 )
                         {
-                            dXdYd = dMatTilt*Vec2d(
-                              x*cdist*(-icdist2)*icdist2*r2, y*cdist*(-icdist2)*icdist2*r2);
+                            dXdYd = dMatTilt*p*cdist*(-icdist2)*icdist2*r2;
                             dpdk_p[5] = fx*dXdYd(0);
                             dpdk_p[dpdk_step+5] = fy*dXdYd(1);
-                            dXdYd = dMatTilt*Vec2d(
-                              x*cdist*(-icdist2)*icdist2*r4, y*cdist*(-icdist2)*icdist2*r4);
+                            dXdYd = dMatTilt*p*cdist*(-icdist2)*icdist2*r4;
                             dpdk_p[6] = fx*dXdYd(0);
                             dpdk_p[dpdk_step+6] = fy*dXdYd(1);
-                            dXdYd = dMatTilt*Vec2d(
-                              x*cdist*(-icdist2)*icdist2*r6, y*cdist*(-icdist2)*icdist2*r6);
+                            dXdYd = dMatTilt*p*cdist*(-icdist2)*icdist2*r6;
                             dpdk_p[7] = fx*dXdYd(0);
                             dpdk_p[dpdk_step+7] = fy*dXdYd(1);
                             if( _dpdk->cols > 8 )
@@ -868,12 +866,12 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
                                 dpdk_p[dpdk_step+11] = fy*dXdYd(1); //s4
                                 if( _dpdk->cols > 12 )
                                 {
-                                    dVecTilt = dMatTiltdTauX * Vec3d(xd0, yd0, 1);
+                                    dVecTilt = dMatTiltdTauX * Vec3d(pd0[0], pd0[1], 1);
                                     dpdk_p[12] = fx * invProjSquare * (
                                       dVecTilt(0) * vecTilt(2) - dVecTilt(2) * vecTilt(0));
                                     dpdk_p[dpdk_step+12] = fy*invProjSquare * (
                                       dVecTilt(1) * vecTilt(2) - dVecTilt(2) * vecTilt(1));
-                                    dVecTilt = dMatTiltdTauY * Vec3d(xd0, yd0, 1);
+                                    dVecTilt = dMatTiltdTauY * Vec3d(pd0[0], pd0[1], 1);
                                     dpdk_p[13] = fx * invProjSquare * (
                                       dVecTilt(0) * vecTilt(2) - dVecTilt(2) * vecTilt(0));
                                     dpdk_p[dpdk_step+13] = fy * invProjSquare * (
@@ -908,24 +906,11 @@ CV_IMPL void cvProjectPoints2( const CvMat* objectPoints,
 
             if( dpdr_p )
             {
-                double dx0dr[] =
-                {
-                    X*dRdr[0] + Y*dRdr[1] + Z*dRdr[2],
-                    X*dRdr[9] + Y*dRdr[10] + Z*dRdr[11],
-                    X*dRdr[18] + Y*dRdr[19] + Z*dRdr[20]
-                };
-                double dy0dr[] =
-                {
-                    X*dRdr[3] + Y*dRdr[4] + Z*dRdr[5],
-                    X*dRdr[12] + Y*dRdr[13] + Z*dRdr[14],
-                    X*dRdr[21] + Y*dRdr[22] + Z*dRdr[23]
-                };
-                double dz0dr[] =
-                {
-                    X*dRdr[6] + Y*dRdr[7] + Z*dRdr[8],
-                    X*dRdr[15] + Y*dRdr[16] + Z*dRdr[17],
-                    X*dRdr[24] + Y*dRdr[25] + Z*dRdr[26]
-                };
+                Vec<double, 9> d0dr = dRdr.reshape<9,3>()*Vec3d(X,Y,Z);
+                double dx0dr[] = {d0dr(0), d0dr(3), d0dr(6)};
+                double dy0dr[] = {d0dr(1), d0dr(4), d0dr(7)};
+                double dz0dr[] = {d0dr(2), d0dr(5), d0dr(8)};
+
                 for( j = 0; j < 3; j++ )
                 {
                     double dxdr = z*(dx0dr[j] - x*dz0dr[j]);
